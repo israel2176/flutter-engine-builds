@@ -1,6 +1,6 @@
-name: Build Flutter Engine (NetFree CA)
+name: Build Flutter Engine (extra roots)
 
-# Builds a NetFree-patched libflutter.so and publishes it as a release of this repo
+# Builds a custom-roots libflutter.so and publishes it as a release of this repo
 # (tag: engine-<cpu>-<engine_hash>). Public repo => unlimited Actions minutes.
 # Only workflow_dispatch: nobody but repo writers can run code here.
 
@@ -73,18 +73,18 @@ jobs:
           fi
           df -h /home/runner/work
 
-      - name: Validate NetFree certificates
+      - name: Validate extra root certificates
         if: steps.exists.outputs.done != 'true'
         run: |
           python3 - <<'PY'
           import re, subprocess
-          pem = open("certs/netfree_roots.pem").read()
+          pem = open("certs/extra_roots.pem").read()
           certs = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem, re.S)
           assert certs, "no certificates found"
           for c in certs:
-              out = subprocess.run(["openssl", "x509", "-noout", "-subject", "-fingerprint", "-sha256"],
+              out = subprocess.run(["openssl", "x509", "-noout", "-fingerprint", "-sha256"],
                                    input=c, text=True, capture_output=True, check=True).stdout
-              print(out.strip().replace("\n", " | "))
+              print(out.strip())
           print(len(certs), "certificates OK")
           PY
 
@@ -125,7 +125,7 @@ jobs:
         run: |
           DART="$(pwd)/work/engine/src/flutter/third_party/dart"
           test -f "$DART/runtime/bin/security_context_linux.cc"
-          python3 tools/patch_security_context.py "$DART" certs/netfree_roots.pem
+          python3 tools/patch_security_context.py "$DART" certs/extra_roots.pem
 
       - name: Build
         if: steps.exists.outputs.done != 'true'
@@ -157,7 +157,7 @@ jobs:
           cp output/libflutter.so "$asset"
           gh release create "$TAG" "$asset" \
             --title "libflutter.so (${{ inputs.android_cpu }}, engine ${{ inputs.engine_hash }})" \
-            --notes "NetFree-patched libflutter.so for Flutter engine commit ${{ inputs.engine_hash }} (${{ inputs.android_cpu }}). Built by GitHub Actions."
+            --notes "custom-roots libflutter.so for Flutter engine commit ${{ inputs.engine_hash }} (${{ inputs.android_cpu }}). Built by GitHub Actions."
 
   # Optional: kick the private Patch App workflow again now that the engine exists.
   # Needs the PATCH_REPO_TOKEN secret (fine-grained PAT, Actions: read/write on israel2176/flutter-custom-ssl).

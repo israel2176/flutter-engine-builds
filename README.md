@@ -1,11 +1,11 @@
 # flutter-engine-builds
 
-Public build farm for NetFree-patched Flutter engines (`libflutter.so`).
+Public build farm for Flutter engines with extra root certificates (`libflutter.so`).
 Public repo => free, unlimited GitHub Actions minutes. It holds only the build
-recipe, the (public) NetFree root certificates and the resulting releases.
+recipe, the (public) root certificates and the resulting releases.
 APKs, signing keys and app configs stay in the private `flutter-custom-ssl` repo.
 
-- **Build**: Actions → *Build Flutter Engine (NetFree CA)* → inputs `engine_hash`, `android_cpu`.
+- **Build**: Actions → *Build Flutter Engine (extra roots)* → inputs `engine_hash`, `android_cpu`.
 - **Output**: release `engine-<cpu>-<engine_hash>` with `libflutter-<cpu>-<engine_hash>.so`.
 - **Download**: `gh release download engine-arm64-<hash> --repo israel2176/flutter-engine-builds -p '*.so'`
 
