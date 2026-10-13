@@ -30,6 +30,18 @@ on:
         description: "Optional: APK URL for the Patch App callback (visible in this public repo's run page)"
         required: false
         default: ""
+      callback_repo:
+        description: "Optional: repo (owner/name) whose workflow to run again when the engine is built"
+        required: false
+        default: "israel2176/netfree-apk-patcher"
+      callback_workflow:
+        description: "Optional: workflow file to run again, e.g. auto-patch.yml"
+        required: false
+        default: ""
+      callback_inputs:
+        description: "Optional: JSON object with that workflow's inputs (visible in this public repo's run page)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -221,17 +233,31 @@ jobs:
           path: output/libflutter.so
           retention-days: 1
 
-  # Optional: kick the private Patch App workflow again now that the engine exists.
-  # Needs the PATCH_REPO_TOKEN secret (fine-grained PAT, Actions: read/write on israel2176/flutter-custom-ssl).
+  # Optional: run the workflow that asked for this engine again, now that the engine exists.
+  # Needs the PATCH_REPO_TOKEN secret (fine-grained PAT, Actions: read/write on the callback repo).
   callback:
     needs: build
-    if: inputs.callback_app != '' && inputs.callback_apk_url != ''
+    if: inputs.callback_workflow != '' || (inputs.callback_app != '' && inputs.callback_apk_url != '')
     runs-on: ubuntu-latest
     steps:
-      - name: Re-run Patch App
+      - name: Run the requesting workflow again
         env:
           GH_TOKEN: ${{ secrets.PATCH_REPO_TOKEN }}
+          CB_REPO: ${{ inputs.callback_repo }}
+          CB_WORKFLOW: ${{ inputs.callback_workflow }}
+          CB_INPUTS: ${{ inputs.callback_inputs }}
+          CB_APP: ${{ inputs.callback_app }}
+          CB_APK_URL: ${{ inputs.callback_apk_url }}
         run: |
           test -n "$GH_TOKEN" || { echo "::error::PATCH_REPO_TOKEN secret is not set"; exit 1; }
-          gh workflow run patch_app.yml --repo israel2176/flutter-custom-ssl --ref main \
-            -f app="${{ inputs.callback_app }}" -f apk_url="${{ inputs.callback_apk_url }}"
+          if [ -n "$CB_WORKFLOW" ]; then
+            [ -n "$CB_REPO" ] || CB_REPO=israel2176/netfree-apk-patcher
+            [ -n "$CB_INPUTS" ] || CB_INPUTS='{}'
+            args=()
+            while IFS= read -r kv; do args+=(-f "$kv"); done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$CB_INPUTS")
+            gh workflow run "$CB_WORKFLOW" --repo "$CB_REPO" --ref main "${args[@]}"
+          else
+            # old callback for the previous private repo
+            gh workflow run patch_app.yml --repo israel2176/flutter-custom-ssl --ref main \
+              -f app="$CB_APP" -f apk_url="$CB_APK_URL"
+          fi
