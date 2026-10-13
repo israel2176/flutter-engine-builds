@@ -51,7 +51,7 @@ jobs:
         uses: easimon/maximize-build-space@v10
         with:
           root-reserve-mb: 8192
-          swap-size-mb: 1024
+          swap-size-mb: 4096
           remove-dotnet: "true"
           remove-android: "true"
           remove-haskell: "true"
@@ -168,6 +168,16 @@ jobs:
           cd "$SRC"
           LTO=--no-lto; [ "${{ inputs.lto }}" = "true" ] && LTO=--lto
           ./flutter/tools/gn --no-goma --android --android-cpu=${{ inputs.android_cpu }} --runtime-mode=release $LTO
+          # Heartbeat every minute: free disk, free memory, swap, load. If the log goes quiet,
+          # the last HB line shows whether the machine ran out of memory or disk.
+          (
+            while true; do
+              sleep 60
+              echo "HB $(date -u +%T) disk_work=$(df -h --output=avail "$GITHUB_WORKSPACE" | tail -1 | tr -d ' ') disk_root=$(df -h --output=avail / | tail -1 | tr -d ' ') mem_avail=$(free -m | awk '/Mem/{print $7}')MB swap_used=$(free -m | awk '/Swap/{print $3}')MB load=$(cut -d' ' -f1-3 /proc/loadavg)"
+            done
+          ) &
+          HB=$!
+          trap 'kill $HB 2>/dev/null || true' EXIT
           # only libflutter.so, not the whole engine (embedding jars, tests, tools...)
           ninja -j"$(nproc)" -C out/$OUT_DIR flutter/shell/platform/android:flutter_shell_native
 
@@ -185,6 +195,8 @@ jobs:
         if: failure()
         run: |
           df -h
+          free -m
+          sudo dmesg 2>/dev/null | grep -iE 'out of memory|oom|killed process' | tail -10 || true
           sudo du -xsh /home/runner/* /tmp /var/tmp 2>/dev/null | sort -rh | head -15
           du -sh "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.cache 2>/dev/null | sort -rh | head -15
 
