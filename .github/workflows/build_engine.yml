@@ -199,13 +199,28 @@ jobs:
           # only libflutter.so, not the whole engine (embedding jars, tests, tools...)
           ninja -j"$(nproc)" -C out/$OUT_DIR flutter/shell/platform/android:flutter_shell_native
 
+      # Keep the unstripped library even if a later step fails, so a packaging bug never costs a rebuild.
+      - name: Save unstripped libflutter.so
+        if: always() && steps.exists.outputs.done != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libflutter-unstripped-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}
+          path: ${{ env.SRC }}/out/${{ env.OUT_DIR }}/libflutter.so
+          retention-days: 3
+          if-no-files-found: ignore
+
       - name: Strip and collect
         if: steps.exists.outputs.done != 'true'
         run: |
           cd "$SRC"
-          STRIP=$(find . -name llvm-strip -type f | head -1)
+          test -f "out/$OUT_DIR/libflutter.so" || { echo "::error::out/$OUT_DIR/libflutter.so was not built"; find out -name 'libflutter*.so' | head; exit 1; }
+          # llvm-strip is a symlink in the toolchain, so look for links as well as regular files
+          STRIP=$(find . -name llvm-strip \( -type f -o -type l \) | head -1)
+          [ -n "$STRIP" ] || STRIP=$(command -v llvm-strip || true)
+          test -n "$STRIP" || { echo "::error::no llvm-strip found"; exit 1; }
+          echo "strip tool: $STRIP"
           mkdir -p "$GITHUB_WORKSPACE/output"
-          cp out/$OUT_DIR/libflutter.so "$GITHUB_WORKSPACE/output/libflutter.so"
+          cp "out/$OUT_DIR/libflutter.so" "$GITHUB_WORKSPACE/output/libflutter.so"
           "$STRIP" "$GITHUB_WORKSPACE/output/libflutter.so"
           ls -la "$GITHUB_WORKSPACE/output"
 
