@@ -1,0 +1,175 @@
+name: Build Flutter Engine (NetFree CA)
+
+# Builds a NetFree-patched libflutter.so and publishes it as a release of this repo
+# (tag: engine-<cpu>-<engine_hash>). Public repo => unlimited Actions minutes.
+# Only workflow_dispatch: nobody but repo writers can run code here.
+
+run-name: "Build engine-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_hash:
+        description: "flutter/flutter commit of the engine (bin/internal/engine.version of the app's Flutter version)"
+        required: true
+        default: "1e9a811bf8e70466596bcf0ea3a8b5adb5f17f7f" # Flutter 3.35.0 / Dart 3.9.0
+      android_cpu:
+        description: "Android CPU (arm64, arm, x64)"
+        required: true
+        default: "arm64"
+      lto:
+        description: "Enable LTO (smaller .so, but the link step is much slower and needs far more RAM)"
+        type: boolean
+        default: false
+      callback_app:
+        description: "Optional: after publishing, run Patch App in flutter-custom-ssl for this apps/<name>"
+        required: false
+        default: ""
+      callback_apk_url:
+        description: "Optional: APK URL for the Patch App callback (visible in this public repo's run page)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: engine-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OUT_DIR: android_release_${{ inputs.android_cpu }}
+      TAG: engine-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}
+    steps:
+      # Merge / and /mnt into one big volume and drop preinstalled toolchains.
+      # Must run before checkout: it re-creates the workspace mount.
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 1024
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+
+      - uses: actions/checkout@v4
+
+      - name: Skip if this engine is already released
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists - nothing to build."
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+          df -h /home/runner/work
+
+      - name: Validate NetFree certificates
+        if: steps.exists.outputs.done != 'true'
+        run: |
+          python3 - <<'PY'
+          import re, subprocess
+          pem = open("certs/netfree_roots.pem").read()
+          certs = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem, re.S)
+          assert certs, "no certificates found"
+          for c in certs:
+              out = subprocess.run(["openssl", "x509", "-noout", "-subject", "-fingerprint", "-sha256"],
+                                   input=c, text=True, capture_output=True, check=True).stdout
+              print(out.strip().replace("\n", " | "))
+          print(len(certs), "certificates OK")
+          PY
+
+      - name: Install build tools
+        if: steps.exists.outputs.done != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 python3-pip ninja-build build-essential pkg-config libfreetype6-dev
+
+      - name: Setup depot_tools
+        if: steps.exists.outputs.done != 'true'
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
+          echo "$HOME/depot_tools" >> "$GITHUB_PATH"
+
+      - name: Fetch Flutter engine ${{ inputs.engine_hash }}
+        if: steps.exists.outputs.done != 'true'
+        run: |
+          mkdir work && cd work
+          cat > .gclient <<GCLIENT
+          solutions = [
+            {
+              "managed": False,
+              "name": ".",
+              "url": "https://github.com/flutter/flutter.git@${{ inputs.engine_hash }}",
+              "custom_deps": {},
+              "custom_vars": {"download_fuchsia_deps": False},
+              "deps_file": "DEPS",
+              "safesync_url": "",
+            },
+          ]
+          GCLIENT
+          gclient sync --shallow --no-history -R
+          df -h /home/runner/work
+
+      - name: Patch Dart security context
+        if: steps.exists.outputs.done != 'true'
+        run: |
+          DART="$(pwd)/work/engine/src/flutter/third_party/dart"
+          test -f "$DART/runtime/bin/security_context_linux.cc"
+          python3 tools/patch_security_context.py "$DART" certs/netfree_roots.pem
+
+      - name: Build
+        if: steps.exists.outputs.done != 'true'
+        run: |
+          cd work/engine/src
+          LTO=--no-lto; [ "${{ inputs.lto }}" = "true" ] && LTO=--lto
+          ./flutter/tools/gn --no-goma --android --android-cpu=${{ inputs.android_cpu }} --runtime-mode=release $LTO
+          # only libflutter.so, not the whole engine (embedding jars, tests, tools...)
+          ninja -j"$(nproc)" -C out/$OUT_DIR flutter/shell/platform/android:flutter_shell_native
+
+      - name: Strip and collect
+        if: steps.exists.outputs.done != 'true'
+        run: |
+          cd work/engine/src
+          STRIP=$(find . -name llvm-strip -type f | head -1)
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          cp out/$OUT_DIR/libflutter.so "$GITHUB_WORKSPACE/output/libflutter.so"
+          "$STRIP" "$GITHUB_WORKSPACE/output/libflutter.so"
+          # sanity: the requested engine hash is in the binary
+          strings "$GITHUB_WORKSPACE/output/libflutter.so" | grep -c "${{ inputs.engine_hash }}"
+          ls -la "$GITHUB_WORKSPACE/output"
+
+      - name: Publish release
+        if: steps.exists.outputs.done != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="libflutter-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}.so"
+          cp output/libflutter.so "$asset"
+          gh release create "$TAG" "$asset" \
+            --title "libflutter.so (${{ inputs.android_cpu }}, engine ${{ inputs.engine_hash }})" \
+            --notes "NetFree-patched libflutter.so for Flutter engine commit ${{ inputs.engine_hash }} (${{ inputs.android_cpu }}). Built by GitHub Actions."
+
+  # Optional: kick the private Patch App workflow again now that the engine exists.
+  # Needs the PATCH_REPO_TOKEN secret (fine-grained PAT, Actions: read/write on israel2176/flutter-custom-ssl).
+  callback:
+    needs: build
+    if: inputs.callback_app != '' && inputs.callback_apk_url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run Patch App
+        env:
+          GH_TOKEN: ${{ secrets.PATCH_REPO_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || { echo "::error::PATCH_REPO_TOKEN secret is not set"; exit 1; }
+          gh workflow run patch_app.yml --repo israel2176/flutter-custom-ssl \
+            -f app="${{ inputs.callback_app }}" -f apk_url="${{ inputs.callback_apk_url }}"
