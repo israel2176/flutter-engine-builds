@@ -1,7 +1,8 @@
 name: Build Flutter Engine (extra roots)
 
-# Builds a custom-roots libflutter.so and publishes it as a release of this repo
-# (tag: engine-<cpu>-<engine_hash>). Public repo => unlimited Actions minutes.
+# Builds a custom-roots libflutter.so and uploads it as a short-lived artifact
+# (name: engine-<cpu>-<engine_hash>, kept 1 day). The private repo pulls it and keeps its own
+# release, so nothing is published here. Public repo => unlimited Actions minutes.
 # Only workflow_dispatch: nobody but repo writers can run code here.
 
 run-name: "Build engine-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}"
@@ -31,7 +32,7 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: engine-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}
@@ -90,21 +91,7 @@ jobs:
           } >> "$GITHUB_ENV"
           df -h / "$GITHUB_WORKSPACE"
 
-      - name: Skip if this engine is already released
-        id: exists
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::notice::Release $TAG already exists - nothing to build."
-            echo "done=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "done=false" >> "$GITHUB_OUTPUT"
-          fi
-          df -h /home/runner/work
-
       - name: Validate extra root certificates
-        if: steps.exists.outputs.done != 'true'
         run: |
           python3 - <<'PY'
           import re, subprocess
@@ -119,20 +106,17 @@ jobs:
           PY
 
       - name: Install build tools
-        if: steps.exists.outputs.done != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y git python3 python3-pip ninja-build build-essential pkg-config libfreetype6-dev
 
       - name: Setup depot_tools
-        if: steps.exists.outputs.done != 'true'
         run: |
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$GITHUB_WORKSPACE/depot_tools"
           echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
 
       # Flutter >= 3.29 keeps the engine inside flutter/flutter; older versions use flutter/engine.
       - name: Detect engine source layout
-        if: steps.exists.outputs.done != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -155,7 +139,6 @@ jobs:
           fi
 
       - name: Fetch Flutter engine ${{ inputs.engine_hash }}
-        if: steps.exists.outputs.done != 'true'
         run: |
           mkdir work && cd work
           cat > .gclient <<GCLIENT
@@ -175,13 +158,11 @@ jobs:
           df -h /home/runner/work
 
       - name: Patch Dart security context
-        if: steps.exists.outputs.done != 'true'
         run: |
           test -f "$DART/runtime/bin/security_context_linux.cc"
           python3 tools/patch_security_context.py "$DART" certs/extra_roots.pem
 
       - name: Build
-        if: steps.exists.outputs.done != 'true'
         run: |
           cd "$SRC"
           LTO=--no-lto; [ "${{ inputs.lto }}" = "true" ] && LTO=--lto
@@ -201,16 +182,15 @@ jobs:
 
       # Keep the unstripped library even if a later step fails, so a packaging bug never costs a rebuild.
       - name: Save unstripped libflutter.so
-        if: always() && steps.exists.outputs.done != 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: libflutter-unstripped-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}
           path: ${{ env.SRC }}/out/${{ env.OUT_DIR }}/libflutter.so
-          retention-days: 3
+          retention-days: 1
           if-no-files-found: ignore
 
       - name: Strip and collect
-        if: steps.exists.outputs.done != 'true'
         run: |
           cd "$SRC"
           test -f "out/$OUT_DIR/libflutter.so" || { echo "::error::out/$OUT_DIR/libflutter.so was not built"; find out -name 'libflutter*.so' | head; exit 1; }
@@ -233,16 +213,13 @@ jobs:
           sudo du -xsh /home/runner/* /tmp /var/tmp 2>/dev/null | sort -rh | head -15
           du -sh "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.cache 2>/dev/null | sort -rh | head -15
 
-      - name: Publish release
-        if: steps.exists.outputs.done != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          asset="libflutter-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}.so"
-          cp output/libflutter.so "$asset"
-          gh release create "$TAG" "$asset" \
-            --title "libflutter.so (${{ inputs.android_cpu }}, engine ${{ inputs.engine_hash }})" \
-            --notes "custom-roots libflutter.so for Flutter engine commit ${{ inputs.engine_hash }} (${{ inputs.android_cpu }}). Built by GitHub Actions."
+      # No public release: the private repo pulls this artifact and keeps its own release.
+      - name: Upload engine (kept for one day)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TAG }}
+          path: output/libflutter.so
+          retention-days: 1
 
   # Optional: kick the private Patch App workflow again now that the engine exists.
   # Needs the PATCH_REPO_TOKEN secret (fine-grained PAT, Actions: read/write on israel2176/flutter-custom-ssl).
