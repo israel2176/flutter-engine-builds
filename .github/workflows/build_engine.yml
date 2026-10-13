@@ -45,6 +45,24 @@ jobs:
       OUT_DIR: android_release_${{ inputs.android_cpu }}
       TAG: engine-${{ inputs.android_cpu }}-${{ inputs.engine_hash }}
     steps:
+      # Delete preinstalled toolchains this build never uses. Must run BEFORE the action below,
+      # because it measures the free space when it starts. (.NET, Android SDK, Haskell, CodeQL
+      # and Docker images are removed by the action itself.)
+      - name: Free disk space
+        run: |
+          df -h / /mnt
+          for d in /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+                   /usr/local/share/chromium /usr/share/miniconda /usr/local/lib/node_modules \
+                   /usr/local/julia* /opt/az /usr/lib/google-cloud-sdk /usr/local/graalvm \
+                   /usr/local/aws-cli /usr/local/aws-sam-cli /opt/microsoft /usr/local/share/vcpkg \
+                   /usr/local/n /usr/share/kotlin /usr/local/lib/heroku /usr/lib/firefox \
+                   /opt/google /usr/lib/mono; do
+            sudo rm -rf $d &
+          done
+          wait
+          sudo apt-get clean || true
+          df -h / /mnt
+
       # Merge / and /mnt into one big volume and drop preinstalled toolchains.
       # Must run before checkout: it re-creates the workspace mount.
       - name: Maximize build space
@@ -168,11 +186,11 @@ jobs:
           cd "$SRC"
           LTO=--no-lto; [ "${{ inputs.lto }}" = "true" ] && LTO=--lto
           ./flutter/tools/gn --no-goma --android --android-cpu=${{ inputs.android_cpu }} --runtime-mode=release $LTO
-          # Heartbeat every minute: free disk, free memory, swap, load. If the log goes quiet,
+          # Heartbeat every 2 minutes: free disk, free memory, swap, load. If the log goes quiet,
           # the last HB line shows whether the machine ran out of memory or disk.
           (
             while true; do
-              sleep 60
+              sleep 120
               echo "HB $(date -u +%T) disk_work=$(df -h --output=avail "$GITHUB_WORKSPACE" | tail -1 | tr -d ' ') disk_root=$(df -h --output=avail / | tail -1 | tr -d ' ') mem_avail=$(free -m | awk '/Mem/{print $7}')MB swap_used=$(free -m | awk '/Swap/{print $3}')MB load=$(cut -d' ' -f1-3 /proc/loadavg)"
             done
           ) &
