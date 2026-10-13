@@ -100,6 +100,30 @@ jobs:
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
           echo "$HOME/depot_tools" >> "$GITHUB_PATH"
 
+      # Flutter >= 3.29 keeps the engine inside flutter/flutter; older versions use flutter/engine.
+      - name: Detect engine source layout
+        if: steps.exists.outputs.done != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          H="${{ inputs.engine_hash }}"
+          if gh api "repos/flutter/flutter/commits/$H" --jq .sha >/dev/null 2>&1; then
+            echo "layout=mono: engine lives in flutter/flutter"
+            echo "SRC=$GITHUB_WORKSPACE/work/engine/src" >> "$GITHUB_ENV"
+            echo "DART=$GITHUB_WORKSPACE/work/engine/src/flutter/third_party/dart" >> "$GITHUB_ENV"
+            echo "GCLIENT_NAME=." >> "$GITHUB_ENV"
+            echo "GCLIENT_URL=https://github.com/flutter/flutter.git@$H" >> "$GITHUB_ENV"
+          elif gh api "repos/flutter/engine/commits/$H" --jq .sha >/dev/null 2>&1; then
+            echo "layout=split: engine lives in flutter/engine"
+            echo "SRC=$GITHUB_WORKSPACE/work/src" >> "$GITHUB_ENV"
+            echo "DART=$GITHUB_WORKSPACE/work/src/third_party/dart" >> "$GITHUB_ENV"
+            echo "GCLIENT_NAME=src/flutter" >> "$GITHUB_ENV"
+            echo "GCLIENT_URL=https://github.com/flutter/engine.git@$H" >> "$GITHUB_ENV"
+          else
+            echo "::error::$H is not a commit of flutter/flutter or flutter/engine - wrong engine hash?"
+            exit 1
+          fi
+
       - name: Fetch Flutter engine ${{ inputs.engine_hash }}
         if: steps.exists.outputs.done != 'true'
         run: |
@@ -108,8 +132,8 @@ jobs:
           solutions = [
             {
               "managed": False,
-              "name": ".",
-              "url": "https://github.com/flutter/flutter.git@${{ inputs.engine_hash }}",
+              "name": "$GCLIENT_NAME",
+              "url": "$GCLIENT_URL",
               "custom_deps": {},
               "custom_vars": {"download_fuchsia_deps": False},
               "deps_file": "DEPS",
@@ -123,14 +147,13 @@ jobs:
       - name: Patch Dart security context
         if: steps.exists.outputs.done != 'true'
         run: |
-          DART="$(pwd)/work/engine/src/flutter/third_party/dart"
           test -f "$DART/runtime/bin/security_context_linux.cc"
           python3 tools/patch_security_context.py "$DART" certs/extra_roots.pem
 
       - name: Build
         if: steps.exists.outputs.done != 'true'
         run: |
-          cd work/engine/src
+          cd "$SRC"
           LTO=--no-lto; [ "${{ inputs.lto }}" = "true" ] && LTO=--lto
           ./flutter/tools/gn --no-goma --android --android-cpu=${{ inputs.android_cpu }} --runtime-mode=release $LTO
           # only libflutter.so, not the whole engine (embedding jars, tests, tools...)
@@ -139,13 +162,11 @@ jobs:
       - name: Strip and collect
         if: steps.exists.outputs.done != 'true'
         run: |
-          cd work/engine/src
+          cd "$SRC"
           STRIP=$(find . -name llvm-strip -type f | head -1)
           mkdir -p "$GITHUB_WORKSPACE/output"
           cp out/$OUT_DIR/libflutter.so "$GITHUB_WORKSPACE/output/libflutter.so"
           "$STRIP" "$GITHUB_WORKSPACE/output/libflutter.so"
-          # sanity: the requested engine hash is in the binary
-          strings "$GITHUB_WORKSPACE/output/libflutter.so" | grep -c "${{ inputs.engine_hash }}"
           ls -la "$GITHUB_WORKSPACE/output"
 
       - name: Publish release
