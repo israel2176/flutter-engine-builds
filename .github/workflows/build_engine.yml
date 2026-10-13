@@ -256,5 +256,5 @@ jobs:
           GH_TOKEN: ${{ secrets.PATCH_REPO_TOKEN }}
         run: |
           test -n "$GH_TOKEN" || { echo "::error::PATCH_REPO_TOKEN secret is not set"; exit 1; }
-          gh workflow run patch_app.yml --repo israel2176/flutter-custom-ssl \
+          gh workflow run patch_app.yml --repo israel2176/flutter-custom-ssl --ref main \
             -f app="${{ inputs.callback_app }}" -f apk_url="${{ inputs.callback_apk_url }}"
