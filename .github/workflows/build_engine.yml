@@ -50,7 +50,7 @@ jobs:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 4096
+          root-reserve-mb: 8192
           swap-size-mb: 1024
           remove-dotnet: "true"
           remove-android: "true"
@@ -59,6 +59,18 @@ jobs:
           remove-docker-images: "true"
 
       - uses: actions/checkout@v4
+
+      # The root disk only keeps a small reserve; send every cache and temp dir to the big volume.
+      - name: Put caches and temp files on the big volume
+        run: |
+          C="$GITHUB_WORKSPACE/.cache"; mkdir -p "$C/tmp"
+          {
+            echo "TMPDIR=$C/tmp"
+            echo "XDG_CACHE_HOME=$C"
+            echo "CIPD_CACHE_DIR=$C/cipd"
+            echo "VPYTHON_VIRTUALENV_ROOT=$C/vpython"
+          } >> "$GITHUB_ENV"
+          df -h / "$GITHUB_WORKSPACE"
 
       - name: Skip if this engine is already released
         id: exists
@@ -97,8 +109,8 @@ jobs:
       - name: Setup depot_tools
         if: steps.exists.outputs.done != 'true'
         run: |
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
-          echo "$HOME/depot_tools" >> "$GITHUB_PATH"
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$GITHUB_WORKSPACE/depot_tools"
+          echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
 
       # Flutter >= 3.29 keeps the engine inside flutter/flutter; older versions use flutter/engine.
       - name: Detect engine source layout
@@ -168,6 +180,13 @@ jobs:
           cp out/$OUT_DIR/libflutter.so "$GITHUB_WORKSPACE/output/libflutter.so"
           "$STRIP" "$GITHUB_WORKSPACE/output/libflutter.so"
           ls -la "$GITHUB_WORKSPACE/output"
+
+      - name: Disk usage (on failure)
+        if: failure()
+        run: |
+          df -h
+          sudo du -xsh /home/runner/* /tmp /var/tmp 2>/dev/null | sort -rh | head -15
+          du -sh "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.cache 2>/dev/null | sort -rh | head -15
 
       - name: Publish release
         if: steps.exists.outputs.done != 'true'
